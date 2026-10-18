@@ -30,6 +30,7 @@ __pycache__/
 !/mods/Skyline_Drive_Mod/skyline.glb
 !/mods/Skyline_Drive_Mod/fallback_car.glb
 !/sdk/examples/mario-kart/kart.glb
+!/sdk/examples/skyline/skyline.glb
 *.gltf
 *.fbx
 *.blend
