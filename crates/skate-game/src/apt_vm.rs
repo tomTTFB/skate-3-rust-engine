@@ -377,6 +377,23 @@ impl Vm {
         }
         host.call(self, object, method, args)
     }
+    /// `new class(args)`: a plain object inheriting `class.prototype`, with
+    /// `class` run on it as the constructor.
+    pub fn construct(
+        &mut self,
+        class: usize,
+        args: Vec<Value>,
+        host: &mut impl Host,
+    ) -> Result<usize, String> {
+        let id = self.object(ObjectKind::Plain);
+        if let Value::Object(proto) = self.get(class, "prototype") {
+            self.objects[id].prototype = Some(proto);
+        }
+        if let ObjectKind::Function(f) = self.objects[class].kind.clone() {
+            self.invoke(f, id, args, host)?;
+        }
+        Ok(id)
+    }
     fn invoke(
         &mut self,
         index: usize,
@@ -741,22 +758,18 @@ impl Vm {
                     let args = (0..n)
                         .map(|_| pop(&mut stack))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let id = self.object(ObjectKind::Plain);
-                    if name == "Array" {
+                    let id = if name == "Array" {
+                        let id = self.object(ObjectKind::Plain);
                         for (j, v) in args.into_iter().enumerate() {
                             self.set(id, j.to_string(), v)?;
                         }
                         self.set(id, "length", Value::Number(n as f64))?;
+                        id
                     } else if let Value::Object(class) = self.get(self.global, &name) {
-                        if let Value::Object(proto) = self.get(class, "prototype") {
-                            self.objects[id].prototype = Some(proto);
-                        }
-                        if let ObjectKind::Function(f) = self.objects[class].kind.clone() {
-                            self.invoke(f, id, args, host)?;
-                        }
+                        self.construct(class, args, host)?
                     } else {
                         return Err(format!("APT constructor absent: {name}"));
-                    }
+                    };
                     stack.push(Value::Object(id));
                 }
                 0x52 | 0xb0 | 0xb1 | 0xb2 | 0xb3 | 0x3d | 0x5d => {

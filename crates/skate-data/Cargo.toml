@@ -10,3 +10,7 @@ zstd = "=0.13.3"
 skate-core = { path = "../skate-core" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# Logging used by skate-game files that the examples include by path.
+tracing = "=0.1.44"
