@@ -36,6 +36,8 @@ mod profiling;
 mod graphics_menu;
 mod retail_menus;
 mod retail_menu_movies;
+mod retail_menu_runtime;
+mod retail_menu_screen;
 mod modding;
 mod customiser;
 mod customiser_parts;

@@ -144,6 +144,8 @@ pub(crate) fn build(
     app.add_plugins(crate::updater::UpdaterPlugin);
     app.add_plugins(crate::multiplayer::MultiplayerPlugin);
     app.add_plugins(crate::scoring_hud::ScoringHudPlugin);
+    // Dev flag SKATE_RETAIL_MENU=1; reuses the HUD's materials, so it follows the HUD plugin.
+    app.add_plugins(crate::retail_menu_screen::RetailMenuScreenPlugin);
     app.add_plugins(crate::debug_cam::DebugCamPlugin);
     app.add_plugins(crate::water_splash::WaterSplashPlugin);
     app.add_plugins(crate::ui_audio::UiAudioPlugin);

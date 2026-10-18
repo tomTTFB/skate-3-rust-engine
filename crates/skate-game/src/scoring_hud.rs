@@ -16,17 +16,18 @@ use bevy::{
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, ShaderType)]
-struct ColorTransform {
-    multiply: Vec4,
-    add: Vec4,
+pub(crate) struct ColorTransform {
+    pub(crate) multiply: Vec4,
+    pub(crate) add: Vec4,
 }
+/// One APT draw: `texel * multiply + add`. The retail menus draw with it too (retail_menu_screen).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct HudMaterial {
+pub(crate) struct HudMaterial {
     #[uniform(0)]
-    color: ColorTransform,
+    pub(crate) color: ColorTransform,
     #[texture(1)]
     #[sampler(2)]
-    atlas: Handle<Image>,
+    pub(crate) atlas: Handle<Image>,
 }
 impl Material2d for HudMaterial {
     fn fragment_shader() -> ShaderRef {
@@ -39,10 +40,10 @@ impl Material2d for HudMaterial {
 /// The offscreen target already contains RGB multiplied by coverage. Applying
 /// ImageNode's straight-alpha blend again suppresses the original soft glow.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-struct HudComposite {
+pub(crate) struct HudComposite {
     #[texture(0)]
     #[sampler(1)]
-    image: Handle<Image>,
+    pub(crate) image: Handle<Image>,
 }
 impl UiMaterial for HudComposite {
     fn fragment_shader() -> ShaderRef {
