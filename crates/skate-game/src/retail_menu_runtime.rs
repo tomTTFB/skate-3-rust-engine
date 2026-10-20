@@ -18,8 +18,8 @@ const ACTION_LIMIT: usize = 4096;
 /// call on an undefined global never reaches the host, so every object the menus call into must
 /// exist for its calls to be answered or recorded: `ScreenManager` (screens register with
 /// `ScreenManager.OnLoaded`) and `coremenu` (the crossbar's data: GetIsDemo, GetMaxSubOptions,
-/// GetProgressionData, ...).
-const NATIVES: [&str; 5] = ["MovieClip", "Math", "FELanguage", "ScreenManager", "coremenu"];
+/// GetProgressionData, ...), and `Object` (library classes attach with `Object.registerClass`).
+const NATIVES: [&str; 6] = ["MovieClip", "Math", "FELanguage", "ScreenManager", "coremenu", "Object"];
 
 /// What `coremenu` answers: the crossbar of the current mode, resolved by the menu registry
 /// (visible tabs and rows, mod edits and greying rules applied). Labels are language-table ids,
@@ -136,6 +136,15 @@ impl Host for MenuHost {
                 Ok(Value::Number(self.random as f64 / 4294967296.0))
             }
             ("global", "ASSetPropFlags") => Ok(Value::Undefined),
+            // Library init actions attach component classes to their symbols, e.g.
+            // `Object.registerClass("HighlightText", menu_part_text_hilite)` (SetTitle, SetState).
+            ("Object", "registerClass") => {
+                let (Some(name), Some(Value::Object(class))) = (args.first(), args.get(1)) else {
+                    return Ok(Value::Bool(false));
+                };
+                let symbols = self.movie.register_class(&name.text(), *class);
+                Ok(Value::Bool(symbols > 0))
+            }
             ("FELanguage", "GetLanguage") => Ok(Value::Text("english".into())),
             // A screen's RegisterScreen passes itself here; the screen manager shows it later.
             ("ScreenManager", "OnLoaded") => {
@@ -225,15 +234,16 @@ impl Runtime {
             unhandled: BTreeMap::new(),
             traces: Vec::new(),
         };
-        let initial: Vec<_> = host
+        // Linked libraries' root init actions first (class packages, registerClass).
+        let mut initial: Vec<_> = host.movie.library_inits.clone();
+        initial.extend(host
             .movie
             .characters
             .values()
             .flat_map(|c| &c.frames)
             .flat_map(|f| &f.controls)
             .filter(|c| c.type_name == "do_init_action")
-            .map(|c| c.actions_offset)
-            .collect();
+            .map(|c| c.actions_offset));
         for offset in initial {
             let code = host
                 .movie
@@ -256,10 +266,14 @@ impl Runtime {
 
     fn drain(&mut self) -> Result<(), String> {
         let mut calls = 0;
-        while let Some(Pending { object, offset, .. }) = self.host.movie.next_action() {
+        while let Some(Pending { object, offset, class, .. }) = self.host.movie.next_action() {
             calls += 1;
             if calls > ACTION_LIMIT {
                 return Err(format!("{}: frame action limit", self.key));
+            }
+            if let Some(class) = class {
+                self.vm.call_function(class, object, vec![], &mut self.host)?;
+                continue;
             }
             let code = self
                 .host
@@ -389,8 +403,12 @@ mod tests {
         for (call, count) in &runtime.host.unhandled {
             eprintln!("  unhandled {count:>4} x {call}");
         }
-        for trace in runtime.host.traces.iter().take(20) {
-            eprintln!("  trace {trace}");
+        let mut distinct: BTreeMap<&str, usize> = BTreeMap::new();
+        for trace in &runtime.host.traces {
+            *distinct.entry(trace.as_str()).or_default() += 1;
+        }
+        for (trace, count) in distinct {
+            eprintln!("  trace {count:>3} x {trace}");
         }
         let scene = set.scene(PAUSE_MENU, &runtime.host.movie);
         let final_draws = crate::apt_scene::draw(&runtime.host.movie, &runtime.vm, &scene).unwrap();
@@ -401,6 +419,15 @@ mod tests {
             .count();
         eprintln!("  on_stage={on_stage} of {}", final_draws.len());
         assert!(on_stage > 0, "the shown pause menu draws nothing on the 1280 x 720 stage");
+        // Row text and state go through the HighlightText component class (SetTitle /
+        // SetState), which its library attaches with Object.registerClass.
+        let reached_host: Vec<_> = runtime
+            .host
+            .unhandled
+            .keys()
+            .filter(|k| k.contains(".SetTitle(") || k.contains(".SetState("))
+            .collect();
+        assert!(reached_host.is_empty(), "component methods fell through to the host: {reached_host:?}");
         for draw in final_draws {
             let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
             for v in &draw.vertices {

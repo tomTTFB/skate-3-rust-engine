@@ -377,6 +377,20 @@ impl Vm {
         }
         host.call(self, object, method, args)
     }
+    /// Runs the function object `function` with `this` = `this` (a registered class's
+    /// constructor on an existing clip, `Object.registerClass`).
+    pub fn call_function(
+        &mut self,
+        function: usize,
+        this: usize,
+        args: Vec<Value>,
+        host: &mut impl Host,
+    ) -> Result<Value, String> {
+        match self.objects.get(function).map(|o| o.kind.clone()) {
+            Some(ObjectKind::Function(f)) => self.invoke(f, this, args, host),
+            _ => Err("APT call target is not a function".into()),
+        }
+    }
     /// `new class(args)`: a plain object inheriting `class.prototype`, with
     /// `class` run on it as the constructor.
     pub fn construct(

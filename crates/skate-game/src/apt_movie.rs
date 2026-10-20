@@ -35,6 +35,9 @@ pub struct Pending {
     pub object: usize,
     pub offset: u32,
     pub event: u32,
+    /// Instead of an action stream: run this registered class (a function object) as the
+    /// clip's constructor (`Object.registerClass`; queued by `create`).
+    pub class: Option<usize>,
 }
 #[derive(Clone)]
 pub struct Movie {
@@ -54,6 +57,18 @@ pub struct Movie {
     /// Shape characters copied in by `link_imports`: local id -> (library key, id there). Their GEO
     /// units and bitmaps stay in the library movie (doc 31, Milestone 4).
     pub shape_origins: BTreeMap<i32, (String, i32)>,
+    /// This movie's export table: (linkage name, character id).
+    pub exports: Vec<(String, i32)>,
+    /// Linkage name -> local characters with that symbol: own exports, plus every library
+    /// export `link_imports` copied in (a library's `Object.registerClass("Name", ...)` names
+    /// its own symbol, which lives here under a local id).
+    pub symbols: BTreeMap<String, Vec<i32>>,
+    /// Character -> registered class (`Object.registerClass`); `create` constructs with it.
+    pub classes: BTreeMap<i32, usize>,
+    /// Root init actions of every linked library, dependencies first. Retail loads and links a
+    /// library before its importer, so its init actions (class packages, `registerClass`) have
+    /// run in the shared global scope first; the runtime runs these before its own.
+    pub library_inits: Vec<u32>,
     states: BTreeMap<i32, Vec<DisplayList>>,
 }
 fn display_states(c: &Character) -> Result<Vec<DisplayList>, String> {
@@ -75,6 +90,20 @@ impl Movie {
         for c in &characters {
             states.insert(c.id, display_states(c)?);
         }
+        let mut exports = Vec::new();
+        for e in json["exports"].as_array().into_iter().flatten() {
+            let (Some(name), Some(id)) = (e["name"].as_str(), e["character_id"].as_i64()) else {
+                return Err("Invalid APT export record".into());
+            };
+            exports.push((name.to_owned(), id as i32));
+        }
+        let mut symbols: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+        for (name, id) in &exports {
+            let ids = symbols.entry(name.clone()).or_default();
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
         Ok(Self {
             characters: characters.into_iter().map(|c| (c.id, c)).collect(),
             instances: BTreeMap::new(),
@@ -84,8 +113,21 @@ impl Movie {
             root: usize::MAX,
             text_assets: crate::apt_text::TextAssets::load(json)?,
             shape_origins: BTreeMap::new(),
+            exports,
+            symbols,
+            classes: BTreeMap::new(),
+            library_inits: Vec::new(),
             states,
         })
+    }
+    /// `Object.registerClass(name, class)`: clips of the symbol `name` created from now on are
+    /// constructed with `class`. Returns how many local characters carry that symbol.
+    pub fn register_class(&mut self, name: &str, class: usize) -> usize {
+        let ids = self.symbols.get(name).cloned().unwrap_or_default();
+        for id in &ids {
+            self.classes.insert(*id, class);
+        }
+        ids.len()
     }
     pub fn initialize(&mut self, vm: &mut Vm) -> Result<(), String> {
         self.root = self.create(vm, 0, None, 0, &[])?;
@@ -147,6 +189,22 @@ impl Movie {
         if sprite {
             self.queue_events(id, events, clip_event::INITIALIZE, true);
             self.queue_events(id, events, clip_event::CONSTRUCT, true);
+            // A registered class (Object.registerClass): the clip inherits the class prototype
+            // and the class runs as its constructor after the construct handlers, which write
+            // the component parameters the constructor reads (`_type`, `mButtonImage`, ...).
+            // NOT RETAIL YET (order): the retail dispatch of the class constructor relative to
+            // the construct event is not decoded; this is the AS2 component order.
+            if let Some(&class) = self.classes.get(&character) {
+                if let Value::Object(prototype) = vm.get(class, "prototype") {
+                    vm.objects[id].prototype = Some(prototype);
+                }
+                self.immediate.push_back(Pending {
+                    object: id,
+                    offset: 0,
+                    event: 0,
+                    class: Some(class),
+                });
+            }
         }
         if !c.frames.is_empty() {
             self.seek(vm, id, 0, depth + 1)?;
@@ -204,6 +262,7 @@ impl Movie {
                 object,
                 offset: e.actions_offset,
                 event,
+                class: None,
             };
             if now {
                 self.immediate.push_back(p);
@@ -339,6 +398,7 @@ impl Movie {
                 object: id,
                 offset,
                 event: 0,
+                class: None,
             });
         }
         Ok(())
@@ -450,6 +510,7 @@ impl Movie {
     ) -> Result<usize, String> {
         let key = crate::apt_imports::library_key(key);
         let mut memo = BTreeMap::new();
+        let mut libs = Vec::new();
         let mut linked = 0;
         for b in resolution.bindings.iter().filter(|b| b.movie == key) {
             if self.characters.contains_key(&b.character_id) {
@@ -465,6 +526,7 @@ impl Movie {
                 resolution,
                 libraries,
                 memo: &mut memo,
+                libs: &mut libs,
             };
             self.copy_character(
                 &mut link,
@@ -475,6 +537,36 @@ impl Movie {
                 0,
             )?;
             linked += 1;
+        }
+        for lib_key in &libs {
+            let lib = &libraries[lib_key];
+            for (name, source) in &lib.exports {
+                if let Some(&local) = memo.get(&(lib_key.clone(), *source)) {
+                    let ids = self.symbols.entry(name.clone()).or_default();
+                    if !ids.contains(&local) {
+                        ids.push(local);
+                    }
+                }
+            }
+            let inits: Vec<u32> = lib
+                .characters
+                .get(&0)
+                .into_iter()
+                .flat_map(|c| &c.frames)
+                .flat_map(|f| &f.controls)
+                .filter(|c| c.type_name == "do_init_action" && c.actions_offset != 0)
+                .map(|c| c.actions_offset)
+                .collect();
+            for offset in inits {
+                let code = lib
+                    .actions
+                    .get(&offset.to_string())
+                    .ok_or_else(|| format!("APT {lib_key} init action {offset} missing"))?
+                    .clone();
+                let fresh = self.fresh_action();
+                self.actions.insert(fresh.to_string(), code);
+                self.library_inits.push(fresh);
+            }
         }
         Ok(linked)
     }
@@ -578,6 +670,10 @@ impl Movie {
         }
         self.states.insert(id, display_states(&c)?);
         self.characters.insert(id, c);
+        // Post-order: a library is recorded after the libraries its characters import.
+        if !link.libs.iter().any(|l| l == lib_key) {
+            link.libs.push(lib_key.to_string());
+        }
         Ok(id)
     }
 }
@@ -585,6 +681,8 @@ struct Link<'a> {
     resolution: &'a crate::apt_imports::Resolution,
     libraries: &'a BTreeMap<String, Movie>,
     memo: &'a mut BTreeMap<(String, i32), i32>,
+    /// Libraries characters were copied from, dependencies first.
+    libs: &'a mut Vec<String>,
 }
 
 #[cfg(test)]
